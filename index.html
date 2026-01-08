@@ -1,11 +1,621 @@
-<!DOCTYPE html>
-<html lang="fa">
-<head>
-  <meta charset="UTF-8">
-  <title>سایت من</title>
-</head>
-<body style="font-family:sans-serif;text-align:center;padding:40px">
-  <h1>سلام 👋</h1>
-  <p>اولین سایت من با GitHub Pages آنلاین شد 🎉</p>
-</body>
-</html>
+import React, { useEffect, useMemo, useState } from "react";
+
+import { initializeApp } from "firebase/app";
+import { getAuth, onAuthStateChanged, signInAnonymously } from "firebase/auth";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  query,
+  orderBy,
+  serverTimestamp,
+} from "firebase/firestore";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+
+import {
+  ShoppingBag,
+  Lock,
+  Plus,
+  Minus,
+  Trash2,
+  ExternalLink,
+  Star,
+  ArrowLeft,
+  Upload,
+} from "lucide-react";
+
+/* ========= Firebase from .env ========= */
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+};
+
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "1234";
+const APP_NAMESPACE = import.meta.env.VITE_APP_NAMESPACE || "premium-land";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
+
+// مسیر محصولات (مشترک برای همه کاربران)
+const productsRef = collection(db, "apps", APP_NAMESPACE, "public", "products");
+
+// لینک پشتیبانی (دلخواه)
+const TELEGRAM_LINK = "https://t.me/permumland";
+
+export default function App() {
+  const [page, setPage] = useState("home"); // home | shop | cart | admin
+  const [products, setProducts] = useState([]);
+  const [cart, setCart] = useState([]);
+  const [user, setUser] = useState(null);
+  const [isAdminAuth, setIsAdminAuth] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+
+  // Auth anonymous
+  useEffect(() => {
+    (async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (e) {
+        console.error("Anonymous sign-in failed:", e);
+      }
+    })();
+
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u || null);
+      setLoading(false);
+    });
+
+    return () => unsub();
+  }, []);
+
+  // Live sync products
+  useEffect(() => {
+    if (!user) return;
+
+    const qy = query(productsRef, orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(
+      qy,
+      (snap) => setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => console.error("onSnapshot error:", err)
+    );
+
+    return () => unsub();
+  }, [user]);
+
+  // Cart helpers
+  const addToCart = (p) => {
+    setCart((prev) => {
+      const exists = prev.find((x) => x.id === p.id);
+      if (exists) return prev.map((x) => (x.id === p.id ? { ...x, q: x.q + 1 } : x));
+      return [...prev, { ...p, q: 1 }];
+    });
+  };
+  const updateQty = (id, delta) =>
+    setCart((prev) => prev.map((x) => (x.id === id ? { ...x, q: Math.max(1, x.q + delta) } : x)));
+  const removeFromCart = (id) => setCart((prev) => prev.filter((x) => x.id !== id));
+
+  const total = useMemo(
+    () => cart.reduce((s, x) => s + Number(x.price || 0) * Number(x.q || 1), 0),
+    [cart]
+  );
+
+  if (loading) {
+    return (
+      <div style={styles.page} dir="rtl">
+        <div style={styles.centerBox}>
+          <div style={styles.spinner} />
+          <div style={{ marginTop: 14, opacity: 0.8, fontWeight: 900 }}>در حال اتصال به دیتابیس...</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.page} dir="rtl">
+      {/* بک‌گراند نورانی */}
+      <div style={styles.bgGlow1} />
+      <div style={styles.bgGlow2} />
+
+      <Header
+        cartCount={cart.length}
+        page={page}
+        setPage={(p) => {
+          setPage(p);
+          if (p !== "admin") setIsAdminAuth(false);
+        }}
+      />
+
+      <div style={styles.container}>
+        {page === "home" && <HomeView setPage={setPage} />}
+
+        {page === "shop" && <ShopView products={products} addToCart={addToCart} setPage={setPage} />}
+
+        {page === "cart" && (
+          <CartView
+            cart={cart}
+            updateQty={updateQty}
+            remove={removeFromCart}
+            total={total}
+            setShowModal={setShowModal}
+            setPage={setPage}
+          />
+        )}
+
+        {page === "admin" &&
+          (isAdminAuth ? (
+            <AdminPanel products={products} setPage={setPage} />
+          ) : (
+            <AdminLogin adminPassword={ADMIN_PASSWORD} setAuth={setIsAdminAuth} setPage={setPage} />
+          ))}
+      </div>
+
+      {/* مودال تلگرام */}
+      {showModal && (
+        <div style={styles.modalOverlay} onClick={() => setShowModal(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 8, ...styles.neonTitle }}>
+              نهایی کردن سفارش
+            </div>
+            <div style={{ opacity: 0.85, lineHeight: 1.9, marginBottom: 16 }}>
+              برای تکمیل خرید و دریافت اکانت، به تلگرام هدایت می‌شوید.
+            </div>
+
+            <a href={TELEGRAM_LINK} target="_blank" rel="noreferrer" style={styles.btnPrimary}>
+              ورود به تلگرام <ExternalLink size={18} />
+            </a>
+
+            <button style={styles.btnGhost} onClick={() => setShowModal(false)}>
+              بازگشت
+            </button>
+          </div>
+        </div>
+      )}
+
+      <footer style={styles.footer}>
+        <div style={{ fontWeight: 900, ...styles.neonTitle }}>Premium Land</div>
+        <div style={{ opacity: 0.65, marginTop: 6 }}>فروشگاه پرمیوم‌های دیجیتال</div>
+      </footer>
+    </div>
+  );
+}
+
+/* =================== UI =================== */
+
+function Header({ cartCount, page, setPage }) {
+  return (
+    <div style={styles.header}>
+      <div style={styles.headerInner}>
+        <div style={styles.brand} onClick={() => setPage("home")}>
+          <div style={styles.logo}>
+            <Star size={18} />
+          </div>
+          <div>
+            <div style={{ fontWeight: 900, ...styles.neonTitle }}>Premium Land</div>
+            <div style={{ fontSize: 11, opacity: 0.75, marginTop: 3 }}>نسخه تحت وب</div>
+          </div>
+        </div>
+
+        <div style={styles.nav}>
+          <button style={navBtn(page === "home")} onClick={() => setPage("home")}>
+            خانه
+          </button>
+          <button style={navBtn(page === "shop")} onClick={() => setPage("shop")}>
+            فروشگاه
+          </button>
+          <a href={TELEGRAM_LINK} target="_blank" rel="noreferrer" style={styles.navLink}>
+            پشتیبانی
+          </a>
+        </div>
+
+        <div style={styles.headerActions}>
+          <button style={styles.iconBtn} onClick={() => setPage("cart")} title="سبد خرید">
+            <ShoppingBag size={20} />
+            {cartCount > 0 && <span style={styles.badge}>{cartCount}</span>}
+          </button>
+
+          <button style={styles.iconBtn} onClick={() => setPage("admin")} title="ادمین">
+            <Lock size={20} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HomeView({ setPage }) {
+  return (
+    <div style={{ padding: "58px 0", textAlign: "center" }}>
+      <div style={styles.pill}>
+        <Star size={16} />
+        معتبرترین فروشگاه اکانت‌های پرمیوم
+      </div>
+
+      <div style={{ fontSize: 52, lineHeight: 1.15, marginTop: 16, ...styles.neonTitle }}>
+        اشتراک‌های <span style={styles.neonCyan}>هوشمند</span> دیجیتال
+      </div>
+
+      <div style={{ maxWidth: 760, margin: "18px auto 0", opacity: 0.85, lineHeight: 1.9, fontWeight: 800 }}>
+        محصولات از پنل مدیریت اضافه می‌شوند، تصویر از گالری آپلود می‌شود و برای همه کاربران نمایش داده می‌شود.
+      </div>
+
+      <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 28, flexWrap: "wrap" }}>
+        <button style={styles.btnPrimary} onClick={() => setPage("shop")}>
+          مشاهده محصولات
+        </button>
+        <button style={styles.btnGhost} onClick={() => setPage("admin")}>
+          ورود به پنل ادمین
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ShopView({ products, addToCart, setPage }) {
+  const fmt = (n) => new Intl.NumberFormat("fa-IR").format(Number(n || 0));
+
+  return (
+    <div>
+      <div style={styles.sectionHeader}>
+        <div style={{ fontSize: 22, fontWeight: 900, ...styles.neonTitle }}>محصولات</div>
+        <button style={styles.btnGhost} onClick={() => setPage("admin")}>
+          پنل مدیریت
+        </button>
+      </div>
+
+      {products.length === 0 ? (
+        <div style={styles.emptyBox}>هنوز محصولی ثبت نشده است.</div>
+      ) : (
+        <div style={styles.grid}>
+          {products.map((p) => (
+            <div key={p.id} style={styles.productCard}>
+              <div style={styles.productGlowBlob} />
+
+              {/* تصویر گوشه‌ای مثل نمونه */}
+              <div style={styles.productImageCorner}>
+                {p.image ? (
+                  <img
+                    src={p.image}
+                    alt={p.title}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    onError={(e) => {
+                      e.currentTarget.onerror = null;
+                      e.currentTarget.style.display = "none";
+                    }}
+                  />
+                ) : (
+                  <div style={{ opacity: 0.25, fontWeight: 900 }}>IMG</div>
+                )}
+              </div>
+
+              {/* محتوا با فاصله از تصویر */}
+              <div style={{ paddingLeft: 118 }}>
+                <div style={{ fontWeight: 900, fontSize: 20, ...styles.neonTitle }}>{p.title}</div>
+                <div style={{ opacity: 0.82, marginTop: 8, lineHeight: 1.9, fontWeight: 800 }}>
+                  {p.description || "توضیحی ثبت نشده است"}
+                </div>
+
+                <div style={styles.priceRow}>
+                  <div style={styles.neonCyan}>
+                    {fmt(p.price)} <span style={{ opacity: 0.75, fontSize: 13, fontWeight: 900 }}>تومان</span>
+                  </div>
+
+                  <button
+                    style={styles.btnPrimarySmall}
+                    onClick={() => {
+                      addToCart(p);
+                      setPage("cart");
+                    }}
+                  >
+                    افزودن به سبد <Plus size={16} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CartView({ cart, updateQty, remove, total, setShowModal, setPage }) {
+  const fmt = (n) => new Intl.NumberFormat("fa-IR").format(Number(n || 0));
+
+  return (
+    <div>
+      <div style={styles.sectionHeader}>
+        <div style={{ fontSize: 22, fontWeight: 900, ...styles.neonTitle }}>سبد خرید</div>
+        <button style={styles.btnGhost} onClick={() => setPage("shop")}>
+          بازگشت به فروشگاه
+        </button>
+      </div>
+
+      {cart.length === 0 ? (
+        <div style={styles.emptyBox}>سبد خرید شما خالی است.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {cart.map((item) => (
+            <div key={item.id} style={styles.cartRow}>
+              <div style={{ fontWeight: 900 }}>{item.title}</div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button style={styles.qtyBtn} onClick={() => updateQty(item.id, -1)}>
+                  <Minus size={16} />
+                </button>
+                <div style={{ minWidth: 28, textAlign: "center", fontWeight: 900 }}>{item.q}</div>
+                <button style={styles.qtyBtn} onClick={() => updateQty(item.id, 1)}>
+                  <Plus size={16} />
+                </button>
+              </div>
+
+              <div style={{ fontWeight: 900, ...styles.neonCyan }}>{fmt(item.price)} تومان</div>
+
+              <button style={styles.trashBtn} onClick={() => remove(item.id)}>
+                <Trash2 size={18} />
+              </button>
+            </div>
+          ))}
+
+          <div style={styles.totalBar}>
+            <div style={{ opacity: 0.7, fontWeight: 900 }}>جمع کل</div>
+            <div style={{ fontWeight: 900, ...styles.neonCyan }}>{fmt(total)} تومان</div>
+          </div>
+
+          <button style={styles.btnPrimary} onClick={() => setShowModal(true)}>
+            تأیید نهایی و هدایت به تلگرام
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminLogin({ adminPassword, setAuth, setPage }) {
+  const [pass, setPass] = useState("");
+
+  const login = () => {
+    if (pass === adminPassword) setAuth(true);
+    else alert("رمز اشتباه است");
+  };
+
+  return (
+    <div style={styles.adminBox}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+        <Lock size={18} />
+        <div style={{ fontWeight: 900, fontSize: 18, ...styles.neonTitle }}>ورود ادمین</div>
+      </div>
+
+      <input
+        type="password"
+        value={pass}
+        onChange={(e) => setPass(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && login()}
+        placeholder="رمز را وارد کنید"
+        style={styles.input}
+      />
+
+      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+        <button style={styles.btnPrimary} onClick={login}>
+          ورود
+        </button>
+        <button style={styles.btnGhost} onClick={() => setPage("home")}>
+          بازگشت
+        </button>
+      </div>
+
+      <div style={{ opacity: 0.65, fontSize: 12, lineHeight: 1.9, marginTop: 10, fontWeight: 700 }}>
+        نکته: برای امنیت نهایی باید ورود ادمین واقعی (Firebase Auth) اضافه شود.
+      </div>
+    </div>
+  );
+}
+
+function AdminPanel({ products, setPage }) {
+  const [title, setTitle] = useState("");
+  const [price, setPrice] = useState("");
+  const [description, setDescription] = useState("");
+
+  const [imageFile, setImageFile] = useState(null);
+  const [preview, setPreview] = useState("");
+
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!imageFile) {
+      setPreview("");
+      return;
+    }
+    const url = URL.createObjectURL(imageFile);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
+  const addProduct = async () => {
+    if (!title.trim()) return alert("عنوان محصول لازم است");
+    const pr = Number(price);
+    if (!Number.isFinite(pr) || pr <= 0) return alert("قیمت معتبر وارد کنید");
+
+    setSaving(true);
+    try {
+      let imageUrl = "";
+
+      // آپلود تصویر در Storage (اختیاری)
+      if (imageFile) {
+        const safeName = imageFile.name.replaceAll(" ", "_");
+        const path = `products/${APP_NAMESPACE}/${Date.now()}-${safeName}`;
+        const imageRef = ref(storage, path);
+        await uploadBytes(imageRef, imageFile);
+        imageUrl = await getDownloadURL(imageRef);
+      }
+
+      await addDoc(productsRef, {
+        title: title.trim(),
+        price: pr,
+        description: description.trim(),
+        image: imageUrl,
+        createdAt: serverTimestamp(),
+      });
+
+      setTitle("");
+      setPrice("");
+      setDescription("");
+      setImageFile(null);
+      setPreview("");
+    } catch (e) {
+      console.error(e);
+      alert("خطا در ذخیره محصول. (Storage/Firestore) کنسول را چک کنید.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteProduct = async (id) => {
+    if (!confirm("حذف شود؟")) return;
+    try {
+      await deleteDoc(doc(db, "apps", APP_NAMESPACE, "public", "products", id));
+    } catch (e) {
+      console.error(e);
+      alert("خطا در حذف محصول");
+    }
+  };
+
+  return (
+    <div>
+      <div style={styles.sectionHeader}>
+        <div style={{ fontSize: 22, fontWeight: 900, ...styles.neonTitle }}>پنل مدیریت</div>
+        <button style={styles.btnGhost} onClick={() => setPage("shop")}>
+          <ArrowLeft size={16} /> بازگشت
+        </button>
+      </div>
+
+      <div style={styles.panelBox}>
+        <div style={{ fontWeight: 900, marginBottom: 8, ...styles.neonCyan }}>افزودن محصول</div>
+
+        <input style={styles.input} placeholder="عنوان" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <input style={styles.input} placeholder="قیمت (عدد)" value={price} onChange={(e) => setPrice(e.target.value)} />
+        <textarea
+          style={{ ...styles.input, minHeight: 90 }}
+          placeholder="توضیحات"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+
+        {/* آپلود از گالری */}
+        <label style={styles.uploadBox}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 900 }}>
+            <Upload size={18} />
+            انتخاب تصویر از گالری (اختیاری)
+          </div>
+          <div style={{ opacity: 0.75, fontSize: 12, marginTop: 6, fontWeight: 700 }}>
+            فرمت‌های jpg / png / webp
+          </div>
+          <input
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => setImageFile(e.target.files?.[0] || null)}
+          />
+        </label>
+
+        {preview && (
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>پیش‌نمایش تصویر:</div>
+            <div style={styles.previewBox}>
+              <img src={preview} alt="preview" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            </div>
+            <button style={styles.btnGhost} onClick={() => setImageFile(null)}>
+              حذف تصویر انتخاب‌شده
+            </button>
+          </div>
+        )}
+
+        <button style={styles.btnPrimary} disabled={saving} onClick={addProduct}>
+          {saving ? "در حال ذخیره..." : "ذخیره محصول"}
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16, fontWeight: 900, ...styles.neonTitle }}>لیست محصولات</div>
+
+      <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+        {products.length === 0 ? (
+          <div style={styles.emptyBox}>محصولی وجود ندارد.</div>
+        ) : (
+          products.map((p) => (
+            <div key={p.id} style={styles.productRow}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <div style={styles.thumb}>
+                  {p.image ? (
+                    <img
+                      src={p.image}
+                      alt={p.title}
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      onError={(e) => {
+                        e.currentTarget.onerror = null;
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
+                  ) : (
+                    <div style={{ opacity: 0.35, fontWeight: 900 }}>IMG</div>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ fontWeight: 900 }}>{p.title}</div>
+                  <div style={{ opacity: 0.8, fontSize: 13, fontWeight: 900 }}>
+                    {new Intl.NumberFormat("fa-IR").format(Number(p.price || 0))} تومان
+                  </div>
+                </div>
+              </div>
+
+              <button style={styles.deleteBtn} onClick={() => deleteProduct(p.id)}>
+                حذف <Trash2 size={16} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =================== Styles =================== */
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "#070A12",
+    color: "#EAF0FF",
+    fontFamily: "Vazirmatn, IRANSans, system-ui, sans-serif",
+    position: "relative",
+    overflowX: "hidden",
+  },
+
+  bgGlow1: {
+    position: "fixed",
+    inset: 0,
+    pointerEvents: "none",
+    background:
+      "radial-gradient(circle at 15% 10%, rgba(124,92,255,0.22), transparent 45%)",
+    filter: "blur(0px)",
+  },
+  bgGlow2: {
+    position: "fixed",
+    inset: 0,
+    pointerEvents: "none",
+    background:
+      "radial-gradient(circle at 85% 20%, rgba(49,211,255,0.18), transparent 45%)",
+    filter: "blur(0px)",
+  },
+
+  neonTitle: {
+    c
